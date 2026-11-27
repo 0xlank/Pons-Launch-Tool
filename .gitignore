@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Persistent runtime data
+data/
+
+# Archived reference files
+robin-tool.zip
+
+# Logs and OS artifacts
+*.log
+.DS_Store
+Thumbs.db

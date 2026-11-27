@@ -1,0 +1,29 @@
+{
+  "name": "pons-launch-tool",
+  "version": "1.0.0",
+  "description": "Production Telegram Bot for Pons V2 Token Launches with 2-Wallet EIP-7702 Auto-Revoke + Fund + Burst Launch",
+  "type": "module",
+  "author": "Core Contributors",
+  "private": true,
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/**/*.test.ts"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.3",
+    "grammy": "^1.48.0",
+    "viem": "^2.56.8",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  }
+}
