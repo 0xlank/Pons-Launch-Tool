@@ -388,7 +388,7 @@ export function formatAccessMenu(
     `👤 <b>Authorized Users (${authorizedUsers.length}):</b>`,
     ...userLines,
     '',
-    '<i>Setiap user memiliki profil terisolasi (wallet, Pinata JWT, draft &amp; preset tidak pernah dibagikan antar user).</i>',
+    '<i>Semua user terdaftar berbagi 1 workspace bersama (wallet, Pinata JWT, settings, draft &amp; preset). Hanya Root Owner yang dapat mengelola akses.</i>',
   ].join('\n');
 }
 

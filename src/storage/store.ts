@@ -20,6 +20,8 @@ import type {
 import { assertStrongEncryptionKey, decryptSecret, encryptSecret } from './crypto.js';
 
 export const MAX_PRESETS_PER_USER = 20;
+export const SHARED_PROFILE_KEY = 'shared';
+const SHARED_PROFILE_ID = 0;
 const WINDOWS_RETRYABLE_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
 const RENAME_MAX_ATTEMPTS = 5;
 
@@ -38,6 +40,8 @@ export interface BotStoreOptions {
   bootstrapDefaults?: EnvBootstrapDefaults;
 }
 
+type SecretFieldName = 'sponsorPk' | 'targetPk' | 'pinataJwt';
+
 function deepClone<T>(value: T): T {
   return structuredClone(value);
 }
@@ -50,8 +54,12 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function buildSecretAad(userId: number, field: 'sponsorPk' | 'targetPk' | 'pinataJwt'): string {
-  return `v1:${userId}:${field}`;
+function buildSharedSecretAad(field: SecretFieldName): string {
+  return `v1:${SHARED_PROFILE_KEY}:${field}`;
+}
+
+function buildLegacyUserSecretAad(legacyUserId: number, field: SecretFieldName): string {
+  return `v1:${legacyUserId}:${field}`;
 }
 
 export class BotStore {
@@ -82,19 +90,10 @@ export class BotStore {
     }
   }
 
-  private normalizeLoadedProfile(rawKey: string, rawProfile: Partial<UserProfile> | undefined): UserProfile | undefined {
-    const parsedId = Number(rawKey);
-    const userId =
-      typeof rawProfile?.userId === 'number' && Number.isSafeInteger(rawProfile.userId) && rawProfile.userId > 0
-        ? rawProfile.userId
-        : Number.isSafeInteger(parsedId) && parsedId > 0
-          ? parsedId
-          : undefined;
-
-    if (userId === undefined) {
-      return undefined;
-    }
-
+  private normalizeLoadedProfile(
+    rawProfile: Partial<UserProfile> | undefined,
+    userId = SHARED_PROFILE_ID,
+  ): UserProfile {
     const defaults = createDefaultUserSettings(this.bootstrapDefaults);
     const emptyDraft = createEmptyTokenDraft();
     const rawSettings = rawProfile?.settings;
@@ -152,6 +151,33 @@ export class BotStore {
     };
   }
 
+  private reencryptLegacySecret(
+    ciphertext: string,
+    legacyUserId: number,
+    field: SecretFieldName,
+  ): string {
+    // Already encrypted with shared AAD?
+    try {
+      decryptSecret(ciphertext, this.encryptionKey, buildSharedSecretAad(field));
+      return ciphertext;
+    } catch {
+      // Try legacy per-user AAD or pre-AAD v1 payload
+    }
+
+    let plaintext: string;
+    try {
+      plaintext = decryptSecret(
+        ciphertext,
+        this.encryptionKey,
+        buildLegacyUserSecretAad(legacyUserId, field),
+      );
+    } catch {
+      plaintext = decryptSecret(ciphertext, this.encryptionKey);
+    }
+
+    return encryptSecret(plaintext, this.encryptionKey, buildSharedSecretAad(field));
+  }
+
   async init(): Promise<void> {
     if (this.initialized) {
       return;
@@ -165,18 +191,70 @@ export class BotStore {
       try {
         const raw = await readFile(this.filePath, 'utf8');
         const parsed = JSON.parse(raw) as Partial<BotStoreData>;
-        const normalizedUsers: Record<string, UserProfile> = {};
+        const rawUsers = parsed.users && typeof parsed.users === 'object' ? parsed.users : {};
+        let needsPersist = false;
+        let sharedProfile: UserProfile;
 
-        if (parsed.users && typeof parsed.users === 'object') {
-          for (const [k, rawProfile] of Object.entries(parsed.users)) {
-            const normalized = this.normalizeLoadedProfile(k, rawProfile);
-            if (normalized) {
-              normalizedUsers[String(normalized.userId)] = normalized;
+        if (rawUsers[SHARED_PROFILE_KEY]) {
+          sharedProfile = this.normalizeLoadedProfile(
+            rawUsers[SHARED_PROFILE_KEY],
+            SHARED_PROFILE_ID,
+          );
+        } else {
+          // Seamless automatic migration from legacy per-user profile (prioritize root owner)
+          let sourceKey: string | undefined;
+          for (const ownerId of this.listOwnerIds()) {
+            const key = String(ownerId);
+            if (rawUsers[key]) {
+              sourceKey = key;
+              break;
             }
+          }
+          if (!sourceKey) {
+            sourceKey = Object.keys(rawUsers)[0];
+          }
+
+          if (sourceKey && rawUsers[sourceKey]) {
+            const legacyRaw = rawUsers[sourceKey];
+            const legacyUserId =
+              typeof legacyRaw.userId === 'number' && Number.isSafeInteger(legacyRaw.userId)
+                ? legacyRaw.userId
+                : Number(sourceKey);
+
+            sharedProfile = this.normalizeLoadedProfile(legacyRaw, SHARED_PROFILE_ID);
+
+            if (Number.isSafeInteger(legacyUserId) && legacyUserId > 0) {
+              if (sharedProfile.wallets.sponsorPkEnc) {
+                sharedProfile.wallets.sponsorPkEnc = this.reencryptLegacySecret(
+                  sharedProfile.wallets.sponsorPkEnc,
+                  legacyUserId,
+                  'sponsorPk',
+                );
+              }
+              if (sharedProfile.wallets.targetPkEnc) {
+                sharedProfile.wallets.targetPkEnc = this.reencryptLegacySecret(
+                  sharedProfile.wallets.targetPkEnc,
+                  legacyUserId,
+                  'targetPk',
+                );
+              }
+              if (sharedProfile.settings.ipfs.pinataJwtEnc) {
+                sharedProfile.settings.ipfs.pinataJwtEnc = this.reencryptLegacySecret(
+                  sharedProfile.settings.ipfs.pinataJwtEnc,
+                  legacyUserId,
+                  'pinataJwt',
+                );
+              }
+            }
+
+            sharedProfile.updatedAt = utcNow();
+            needsPersist = true;
+          } else {
+            sharedProfile = this.normalizeLoadedProfile(undefined, SHARED_PROFILE_ID);
           }
         }
 
-        this.data = {
+        const loadedData: BotStoreData = {
           version: 1,
           authorizedUsers: Array.isArray(parsed.authorizedUsers)
             ? parsed.authorizedUsers.filter(
@@ -187,8 +265,15 @@ export class BotStore {
                   !this.ownerIds.has(entry.userId),
               )
             : [],
-          users: normalizedUsers,
+          users: {
+            [SHARED_PROFILE_KEY]: sharedProfile,
+          },
         };
+
+        if (needsPersist) {
+          await this.persistDataUnsafe(loadedData);
+        }
+        this.data = loadedData;
       } catch (err: unknown) {
         const code = (err as NodeJS.ErrnoException | undefined)?.code;
         if (code !== 'ENOENT') {
@@ -214,7 +299,9 @@ export class BotStore {
         const initialData: BotStoreData = {
           version: 1,
           authorizedUsers: initialEntries,
-          users: {},
+          users: {
+            [SHARED_PROFILE_KEY]: this.normalizeLoadedProfile(undefined, SHARED_PROFILE_ID),
+          },
         };
 
         await this.persistDataUnsafe(initialData);
@@ -295,24 +382,14 @@ export class BotStore {
     }
   }
 
-  private getOrCreateProfileIn(data: BotStoreData, userId: number): { profile: UserProfile; created: boolean } {
-    const key = String(userId);
-    const existing = data.users[key];
+  private getOrCreateSharedProfileIn(data: BotStoreData): { profile: UserProfile; created: boolean } {
+    const existing = data.users[SHARED_PROFILE_KEY];
     if (existing) {
       return { profile: existing, created: false };
     }
 
-    const now = utcNow();
-    const fresh: UserProfile = {
-      userId,
-      createdAt: now,
-      updatedAt: now,
-      settings: createDefaultUserSettings(this.bootstrapDefaults),
-      wallets: {},
-      tokenDraft: createEmptyTokenDraft(),
-      presets: [],
-    };
-    data.users[key] = fresh;
+    const fresh = this.normalizeLoadedProfile(undefined, SHARED_PROFILE_ID);
+    data.users[SHARED_PROFILE_KEY] = fresh;
     return { profile: fresh, created: true };
   }
 
@@ -410,40 +487,31 @@ export class BotStore {
   }
 
   // ---------------------------------------------------------------------------
-  // Isolated Per-User Profiles, Settings, Secrets, Drafts, and Presets
+  // Shared Workspace State (Settings, Encrypted Secrets, Drafts, and Presets)
   // ---------------------------------------------------------------------------
 
-  getUserProfile(userId: number): UserProfile {
-    const existing = this.data.users[String(userId)];
+  getUserProfile(_userId: number): UserProfile {
+    const existing = this.data.users[SHARED_PROFILE_KEY];
     if (existing) {
       return deepClone(existing);
     }
 
-    const now = utcNow();
-    return {
-      userId,
-      createdAt: now,
-      updatedAt: now,
-      settings: createDefaultUserSettings(this.bootstrapDefaults),
-      wallets: {},
-      tokenDraft: createEmptyTokenDraft(),
-      presets: [],
-    };
+    return this.normalizeLoadedProfile(undefined, SHARED_PROFILE_ID);
   }
 
-  async ensureUserProfile(userId: number): Promise<UserProfile> {
+  async ensureUserProfile(_userId: number): Promise<UserProfile> {
     return this.mutateAndPersist((nextData) => {
-      const { profile, created } = this.getOrCreateProfileIn(nextData, userId);
+      const { profile, created } = this.getOrCreateSharedProfileIn(nextData);
       return { result: deepClone(profile), changed: created };
     });
   }
 
   async updateUserSettings(
-    userId: number,
+    _userId: number,
     updater: (settings: UserSettings) => UserSettings | void,
   ): Promise<UserSettings> {
     return this.mutateAndPersist((nextData) => {
-      const { profile } = this.getOrCreateProfileIn(nextData, userId);
+      const { profile } = this.getOrCreateSharedProfileIn(nextData);
       const working = deepClone(profile.settings);
       const updated = updater(working) ?? working;
       profile.settings = updated;
@@ -452,53 +520,53 @@ export class BotStore {
     });
   }
 
-  async setSponsorPrivateKey(userId: number, privateKey: Hex): Promise<void> {
+  async setSponsorPrivateKey(_userId: number, privateKey: Hex): Promise<void> {
     await this.mutateAndPersist((nextData) => {
-      const { profile } = this.getOrCreateProfileIn(nextData, userId);
+      const { profile } = this.getOrCreateSharedProfileIn(nextData);
       profile.wallets.sponsorPkEnc = encryptSecret(
         privateKey,
         this.encryptionKey,
-        buildSecretAad(userId, 'sponsorPk'),
+        buildSharedSecretAad('sponsorPk'),
       );
       profile.updatedAt = utcNow();
       return { result: undefined, changed: true };
     });
   }
 
-  async clearSponsorPrivateKey(userId: number): Promise<void> {
+  async clearSponsorPrivateKey(_userId: number): Promise<void> {
     await this.mutateAndPersist((nextData) => {
-      const { profile } = this.getOrCreateProfileIn(nextData, userId);
+      const { profile } = this.getOrCreateSharedProfileIn(nextData);
       delete profile.wallets.sponsorPkEnc;
       profile.updatedAt = utcNow();
       return { result: undefined, changed: true };
     });
   }
 
-  async setTargetPrivateKey(userId: number, privateKey: Hex): Promise<void> {
+  async setTargetPrivateKey(_userId: number, privateKey: Hex): Promise<void> {
     await this.mutateAndPersist((nextData) => {
-      const { profile } = this.getOrCreateProfileIn(nextData, userId);
+      const { profile } = this.getOrCreateSharedProfileIn(nextData);
       profile.wallets.targetPkEnc = encryptSecret(
         privateKey,
         this.encryptionKey,
-        buildSecretAad(userId, 'targetPk'),
+        buildSharedSecretAad('targetPk'),
       );
       profile.updatedAt = utcNow();
       return { result: undefined, changed: true };
     });
   }
 
-  async clearTargetPrivateKey(userId: number): Promise<void> {
+  async clearTargetPrivateKey(_userId: number): Promise<void> {
     await this.mutateAndPersist((nextData) => {
-      const { profile } = this.getOrCreateProfileIn(nextData, userId);
+      const { profile } = this.getOrCreateSharedProfileIn(nextData);
       delete profile.wallets.targetPkEnc;
       profile.updatedAt = utcNow();
       return { result: undefined, changed: true };
     });
   }
 
-  async clearAllWallets(userId: number): Promise<void> {
+  async clearAllWallets(_userId: number): Promise<void> {
     await this.mutateAndPersist((nextData) => {
-      const { profile } = this.getOrCreateProfileIn(nextData, userId);
+      const { profile } = this.getOrCreateSharedProfileIn(nextData);
       delete profile.wallets.sponsorPkEnc;
       delete profile.wallets.targetPkEnc;
       profile.updatedAt = utcNow();
@@ -506,8 +574,8 @@ export class BotStore {
     });
   }
 
-  getDecryptedWallets(userId: number): PartialDecryptedWallets {
-    const profile = this.data.users[String(userId)];
+  getDecryptedWallets(_userId: number): PartialDecryptedWallets {
+    const profile = this.data.users[SHARED_PROFILE_KEY];
     if (!profile) {
       return {};
     }
@@ -517,56 +585,56 @@ export class BotStore {
       result.sponsorPk = decryptSecret(
         profile.wallets.sponsorPkEnc,
         this.encryptionKey,
-        buildSecretAad(userId, 'sponsorPk'),
+        buildSharedSecretAad('sponsorPk'),
       ) as Hex;
     }
     if (profile.wallets.targetPkEnc) {
       result.targetPk = decryptSecret(
         profile.wallets.targetPkEnc,
         this.encryptionKey,
-        buildSecretAad(userId, 'targetPk'),
+        buildSharedSecretAad('targetPk'),
       ) as Hex;
     }
     return result;
   }
 
-  async setPinataJwt(userId: number, jwt: string): Promise<void> {
+  async setPinataJwt(_userId: number, jwt: string): Promise<void> {
     await this.mutateAndPersist((nextData) => {
-      const { profile } = this.getOrCreateProfileIn(nextData, userId);
+      const { profile } = this.getOrCreateSharedProfileIn(nextData);
       profile.settings.ipfs.pinataJwtEnc = encryptSecret(
         jwt.trim(),
         this.encryptionKey,
-        buildSecretAad(userId, 'pinataJwt'),
+        buildSharedSecretAad('pinataJwt'),
       );
       profile.updatedAt = utcNow();
       return { result: undefined, changed: true };
     });
   }
 
-  async clearPinataJwt(userId: number): Promise<void> {
+  async clearPinataJwt(_userId: number): Promise<void> {
     await this.mutateAndPersist((nextData) => {
-      const { profile } = this.getOrCreateProfileIn(nextData, userId);
+      const { profile } = this.getOrCreateSharedProfileIn(nextData);
       delete profile.settings.ipfs.pinataJwtEnc;
       profile.updatedAt = utcNow();
       return { result: undefined, changed: true };
     });
   }
 
-  getDecryptedPinataJwt(userId: number): string | undefined {
-    const profile = this.data.users[String(userId)];
+  getDecryptedPinataJwt(_userId: number): string | undefined {
+    const profile = this.data.users[SHARED_PROFILE_KEY];
     const enc = profile?.settings.ipfs.pinataJwtEnc;
     if (!enc) {
       return undefined;
     }
-    return decryptSecret(enc, this.encryptionKey, buildSecretAad(userId, 'pinataJwt'));
+    return decryptSecret(enc, this.encryptionKey, buildSharedSecretAad('pinataJwt'));
   }
 
   async updateTokenDraft(
-    userId: number,
+    _userId: number,
     updater: (draft: TokenDraft) => TokenDraft | void,
   ): Promise<TokenDraft> {
     return this.mutateAndPersist((nextData) => {
-      const { profile } = this.getOrCreateProfileIn(nextData, userId);
+      const { profile } = this.getOrCreateSharedProfileIn(nextData);
       const working = deepClone(profile.tokenDraft);
       const updated = updater(working) ?? working;
       profile.tokenDraft = updated;
@@ -575,28 +643,28 @@ export class BotStore {
     });
   }
 
-  async clearTokenDraft(userId: number): Promise<TokenDraft> {
+  async clearTokenDraft(_userId: number): Promise<TokenDraft> {
     return this.mutateAndPersist((nextData) => {
-      const { profile } = this.getOrCreateProfileIn(nextData, userId);
+      const { profile } = this.getOrCreateSharedProfileIn(nextData);
       profile.tokenDraft = createEmptyTokenDraft();
       profile.updatedAt = utcNow();
       return { result: deepClone(profile.tokenDraft), changed: true };
     });
   }
 
-  listPresets(userId: number): TokenPreset[] {
-    const profile = this.data.users[String(userId)];
+  listPresets(_userId: number): TokenPreset[] {
+    const profile = this.data.users[SHARED_PROFILE_KEY];
     return profile ? deepClone(profile.presets) : [];
   }
 
-  async savePreset(userId: number, label: string, draft?: TokenDraft): Promise<TokenPreset> {
+  async savePreset(_userId: number, label: string, draft?: TokenDraft): Promise<TokenPreset> {
     const cleanLabel = label.trim().slice(0, 48);
     if (!cleanLabel) {
       throw new Error('Preset label must not be empty');
     }
 
     return this.mutateAndPersist((nextData) => {
-      const { profile } = this.getOrCreateProfileIn(nextData, userId);
+      const { profile } = this.getOrCreateSharedProfileIn(nextData);
       const now = utcNow();
       const sourceDraft = deepClone(draft ?? profile.tokenDraft);
       const existing = profile.presets.find(
@@ -628,9 +696,9 @@ export class BotStore {
     });
   }
 
-  async loadPresetToDraft(userId: number, presetId: string): Promise<TokenDraft> {
+  async loadPresetToDraft(_userId: number, presetId: string): Promise<TokenDraft> {
     return this.mutateAndPersist((nextData) => {
-      const { profile } = this.getOrCreateProfileIn(nextData, userId);
+      const { profile } = this.getOrCreateSharedProfileIn(nextData);
       const preset = profile.presets.find((item) => item.id === presetId);
       if (!preset) {
         throw new Error(`Preset "${presetId}" not found`);
@@ -642,9 +710,9 @@ export class BotStore {
     });
   }
 
-  async deletePreset(userId: number, presetId: string): Promise<boolean> {
+  async deletePreset(_userId: number, presetId: string): Promise<boolean> {
     return this.mutateAndPersist((nextData) => {
-      const { profile } = this.getOrCreateProfileIn(nextData, userId);
+      const { profile } = this.getOrCreateSharedProfileIn(nextData);
       const before = profile.presets.length;
       profile.presets = profile.presets.filter((item) => item.id !== presetId);
       const removed = profile.presets.length < before;
@@ -660,9 +728,9 @@ export class BotStore {
    * and active token draft fields while preserving network, contract, funding/tax,
    * execution tuning, IPFS/Pinata settings, saved presets, and root ACL.
    */
-  async resetLaunchData(userId: number): Promise<UserProfile> {
+  async resetLaunchData(_userId: number): Promise<UserProfile> {
     return this.mutateAndPersist((nextData) => {
-      const { profile } = this.getOrCreateProfileIn(nextData, userId);
+      const { profile } = this.getOrCreateSharedProfileIn(nextData);
 
       // 1 & 2: Clear Sponsor PK and Target PK
       delete profile.wallets.sponsorPkEnc;

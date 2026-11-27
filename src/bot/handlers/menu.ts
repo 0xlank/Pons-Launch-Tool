@@ -130,6 +130,7 @@ export function registerMenuHandlers(
     }
 
     session.clearPendingInput(userId);
+    session.clearAllLaunchConfirmations();
     await store.resetLaunchData(userId);
     await answerCallbackSafe(ctx, {
       text: '✅ Data launch berhasil di-reset (pengaturan, Pinata & preset tetap aman).',

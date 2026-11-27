@@ -149,6 +149,7 @@ export function registerSettingsHandlers(
       s.network = createDefaultNetworkSettings(bootstrapDefaults);
     });
     evictPublicClient(prevNetwork);
+    session.clearAllLaunchConfirmations();
     await answerCallbackSafe(ctx, { text: '✅ Network dikembalikan ke default.' });
     await renderScreen(ctx, store, userId, 'set_network');
   });
@@ -186,6 +187,7 @@ export function registerSettingsHandlers(
     const updated = await store.updateUserSettings(userId, (s) => {
       s.contract.buybackEnabled = !s.contract.buybackEnabled;
     });
+    session.clearAllLaunchConfirmations();
     await answerCallbackSafe(ctx, {
       text: `Buyback: ${updated.contract.buybackEnabled ? 'AKTIF' : 'NONAKTIF'}`,
     });
@@ -206,6 +208,7 @@ export function registerSettingsHandlers(
     await store.updateUserSettings(userId, (s) => {
       s.contract = createDefaultContractSettings();
     });
+    session.clearAllLaunchConfirmations();
     await answerCallbackSafe(ctx, { text: '✅ Contract dikembalikan ke default.' });
     await renderScreen(ctx, store, userId, 'set_factory');
   });
@@ -343,6 +346,7 @@ export function registerSettingsHandlers(
     await store.updateUserSettings(userId, (s) => {
       s.execution = createDefaultExecutionSettings();
     });
+    session.clearAllLaunchConfirmations();
     await answerCallbackSafe(ctx, { text: '✅ Speed & Gas dikembalikan ke default.' });
     await renderScreen(ctx, store, userId, 'set_speed');
   });
@@ -669,6 +673,7 @@ export async function handleSettingsPendingInput(
   }
 
   session.clearPendingInput(userId);
+  session.clearAllLaunchConfirmations();
   await renderScreen(ctx, store, userId, pending.returnScreen, { forceReply: true });
   return true;
 }

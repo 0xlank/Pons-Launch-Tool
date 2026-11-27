@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, beforeEach, describe, it } from 'node:test';
 import type { Hex } from 'viem';
-import { BotStore } from '../src/storage/store.js';
+import { encryptSecret } from '../src/storage/crypto.js';
+import { BotStore, SHARED_PROFILE_KEY } from '../src/storage/store.js';
 
 // Deterministic well-known Anvil / Hardhat test private keys (NEVER real funds)
 const SPONSOR_PK_1: Hex = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -408,7 +409,6 @@ describe('Encrypted BotStore (src/storage/store.ts)', () => {
     }
     ops.push(store.setSponsorPrivateKey(OWNER_ID, SPONSOR_PK_1));
     ops.push(store.setTargetPrivateKey(OWNER_ID, TARGET_PK_1));
-    ops.push(store.setSponsorPrivateKey(USER_B_ID, SPONSOR_PK_2));
     ops.push(
       store.updateUserSettings(OWNER_ID, (s) => {
         s.fee.creatorTaxBps = 450;
@@ -421,7 +421,7 @@ describe('Encrypted BotStore (src/storage/store.ts)', () => {
     assert.equal(store.listAuthorizedUsers().length, userCount);
     assert.equal(store.getDecryptedWallets(OWNER_ID).sponsorPk, SPONSOR_PK_1);
     assert.equal(store.getDecryptedWallets(OWNER_ID).targetPk, TARGET_PK_1);
-    assert.equal(store.getDecryptedWallets(USER_B_ID).sponsorPk, SPONSOR_PK_2);
+    assert.equal(store.getDecryptedWallets(USER_B_ID).sponsorPk, SPONSOR_PK_1);
     assert.equal(store.getUserProfile(OWNER_ID).settings.fee.creatorTaxBps, 450);
 
     // Reload from disk to ensure serialized JSON is completely valid and complete
@@ -434,10 +434,10 @@ describe('Encrypted BotStore (src/storage/store.ts)', () => {
     assert.equal(reloaded.listPresets(OWNER_ID).length, presetCount);
     assert.equal(reloaded.listAuthorizedUsers().length, userCount);
     assert.equal(reloaded.getDecryptedWallets(OWNER_ID).sponsorPk, SPONSOR_PK_1);
-    assert.equal(reloaded.getDecryptedWallets(USER_B_ID).sponsorPk, SPONSOR_PK_2);
+    assert.equal(reloaded.getDecryptedWallets(USER_B_ID).sponsorPk, SPONSOR_PK_1);
   });
 
-  it('enforces strict per-user isolation so User B never inherits Owner credentials, settings, or drafts', async () => {
+  it('shares a single synchronized workspace across Owner and all authorized users', async () => {
     const { filePath } = await createTempStoreFile();
     const store = new BotStore({
       filePath,
@@ -446,7 +446,7 @@ describe('Encrypted BotStore (src/storage/store.ts)', () => {
     });
     await store.init();
 
-    // Owner configures everything
+    // Owner configures shared workspace
     await store.addAuthorizedUser(OWNER_ID, USER_B_ID, 'Operator B');
     await store.addAuthorizedUser(OWNER_ID, USER_C_ID, 'Operator C');
     await store.setSponsorPrivateKey(OWNER_ID, SPONSOR_PK_1);
@@ -459,41 +459,107 @@ describe('Encrypted BotStore (src/storage/store.ts)', () => {
       s.ipfs.pinataGateway = 'https://owner-gw.example.com/ipfs';
     });
     await store.updateTokenDraft(OWNER_ID, (d) => {
-      d.name = 'Owner Secret Token';
-      d.symbol = 'OWN';
+      d.name = 'Shared Launch Token';
+      d.symbol = 'SHRD';
       d.logo = 'https://owner.example.com/logo.png';
     });
-    await store.savePreset(OWNER_ID, 'Owner Preset');
+    await store.savePreset(OWNER_ID, 'Shared Preset');
 
-    // User B initializes profile
+    // User B and User C immediately see the exact same shared workspace state
     const profileB = await store.ensureUserProfile(USER_B_ID);
-    assert.equal(profileB.userId, USER_B_ID);
-    assert.deepEqual(store.getDecryptedWallets(USER_B_ID), {});
-    assert.equal(store.getDecryptedPinataJwt(USER_B_ID), undefined);
-    assert.equal(profileB.wallets.sponsorPkEnc, undefined);
-    assert.equal(profileB.wallets.targetPkEnc, undefined);
-    assert.equal(profileB.settings.ipfs.pinataJwtEnc, undefined);
-    assert.equal(profileB.settings.fee.creatorFeeRecipient, '');
-    assert.notEqual(profileB.settings.network.rpcUrl, 'https://owner-private-rpc.example.com');
-    assert.equal(profileB.tokenDraft.name, '');
-    assert.equal(profileB.tokenDraft.symbol, '');
-    assert.equal(profileB.presets.length, 0);
+    assert.equal(store.getDecryptedWallets(USER_B_ID).sponsorPk, SPONSOR_PK_1);
+    assert.equal(store.getDecryptedWallets(USER_B_ID).targetPk, TARGET_PK_1);
+    assert.equal(store.getDecryptedPinataJwt(USER_B_ID), SAMPLE_PINATA_JWT);
+    assert.equal(profileB.settings.fee.creatorFeeRecipient, FEE_RECIPIENT);
+    assert.equal(profileB.settings.network.rpcUrl, 'https://owner-private-rpc.example.com');
+    assert.equal(profileB.tokenDraft.name, 'Shared Launch Token');
+    assert.equal(profileB.tokenDraft.symbol, 'SHRD');
+    assert.equal(profileB.presets.length, 1);
 
     // Mutating returned object from getUserProfile must not mutate internal store state
     profileB.tokenDraft.name = 'External Mutation Attempt';
-    assert.equal(store.getUserProfile(USER_B_ID).tokenDraft.name, '');
+    assert.equal(store.getUserProfile(USER_B_ID).tokenDraft.name, 'Shared Launch Token');
 
-    // User B setting its own data and resetting does not affect Owner or User C
-    await store.setSponsorPrivateKey(USER_B_ID, SPONSOR_PK_2);
+    // User B updates draft and User C / Owner see it immediately
+    await store.updateTokenDraft(USER_B_ID, (d) => {
+      d.name = 'Updated By Operator B';
+    });
+    assert.equal(store.getUserProfile(OWNER_ID).tokenDraft.name, 'Updated By Operator B');
+    assert.equal(store.getUserProfile(USER_C_ID).tokenDraft.name, 'Updated By Operator B');
+
+    // Resetting from User B resets the shared launch data while keeping Pinata/network/presets
     await store.resetLaunchData(USER_B_ID);
-    assert.equal(store.getDecryptedWallets(OWNER_ID).sponsorPk, SPONSOR_PK_1);
-    assert.equal(store.getDecryptedWallets(OWNER_ID).targetPk, TARGET_PK_1);
-    assert.equal(store.getDecryptedPinataJwt(OWNER_ID), SAMPLE_PINATA_JWT);
-    assert.equal(store.getUserProfile(OWNER_ID).tokenDraft.name, 'Owner Secret Token');
+    assert.deepEqual(store.getDecryptedWallets(OWNER_ID), {});
     assert.deepEqual(store.getDecryptedWallets(USER_C_ID), {});
+    assert.equal(store.getDecryptedPinataJwt(OWNER_ID), SAMPLE_PINATA_JWT);
+    assert.equal(store.getUserProfile(OWNER_ID).tokenDraft.name, '');
+    assert.equal(store.listPresets(USER_C_ID).length, 1);
   });
 
-  it('rejects cross-user and cross-field ciphertext transplant on disk via GCM AAD binding', async () => {
+  it('automatically migrates legacy per-user store.json into shared workspace without losing encrypted secrets', async () => {
+    const { filePath } = await createTempStoreFile();
+    const legacySponsorCipher = encryptSecret(SPONSOR_PK_1, TEST_ENCRYPTION_KEY, `v1:${OWNER_ID}:sponsorPk`);
+    const legacyTargetCipher = encryptSecret(TARGET_PK_1, TEST_ENCRYPTION_KEY, `v1:${OWNER_ID}:targetPk`);
+    const legacyPinataCipher = encryptSecret(SAMPLE_PINATA_JWT, TEST_ENCRYPTION_KEY, `v1:${OWNER_ID}:pinataJwt`);
+
+    // Seed disk with legacy per-user format
+    const initStore = new BotStore({
+      filePath,
+      encryptionKey: TEST_ENCRYPTION_KEY,
+      ownerIds: [OWNER_ID],
+    });
+    await initStore.init();
+
+    const legacyPayload = {
+      version: 1,
+      authorizedUsers: [
+        { userId: USER_B_ID, label: 'Team Member', addedBy: OWNER_ID, addedAt: '2026-01-01T00:00:00.000Z' },
+      ],
+      users: {
+        [String(OWNER_ID)]: {
+          userId: OWNER_ID,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+          settings: {
+            fee: { creatorFeeRecipient: FEE_RECIPIENT, creatorTaxBps: 400 },
+            ipfs: { pinataJwtEnc: legacyPinataCipher },
+          },
+          wallets: {
+            sponsorPkEnc: legacySponsorCipher,
+            targetPkEnc: legacyTargetCipher,
+          },
+          tokenDraft: {
+            name: 'Migrated Token',
+            symbol: 'MIG',
+            logo: 'https://example.com/mig.png',
+          },
+          presets: [],
+        },
+      },
+    };
+    await writeFile(filePath, JSON.stringify(legacyPayload, null, 2), 'utf8');
+
+    const migrated = new BotStore({
+      filePath,
+      encryptionKey: TEST_ENCRYPTION_KEY,
+      ownerIds: [OWNER_ID],
+    });
+    await migrated.init();
+
+    assert.equal(migrated.getDecryptedWallets(OWNER_ID).sponsorPk, SPONSOR_PK_1);
+    assert.equal(migrated.getDecryptedWallets(USER_B_ID).sponsorPk, SPONSOR_PK_1);
+    assert.equal(migrated.getDecryptedWallets(USER_B_ID).targetPk, TARGET_PK_1);
+    assert.equal(migrated.getDecryptedPinataJwt(USER_B_ID), SAMPLE_PINATA_JWT);
+    assert.equal(migrated.getUserProfile(USER_B_ID).settings.fee.creatorFeeRecipient, FEE_RECIPIENT);
+    assert.equal(migrated.getUserProfile(USER_B_ID).tokenDraft.name, 'Migrated Token');
+
+    // Verify migrated file on disk now stores users.shared
+    const onDisk = JSON.parse(await readFile(filePath, 'utf8')) as { users: Record<string, unknown> };
+    assert.ok(onDisk.users[SHARED_PROFILE_KEY]);
+    assert.equal(onDisk.users[String(OWNER_ID)], undefined);
+  });
+
+  it('rejects cross-field ciphertext transplant on disk via shared field-bound GCM AAD', async () => {
     const { filePath } = await createTempStoreFile();
     const store = new BotStore({
       filePath,
@@ -502,16 +568,14 @@ describe('Encrypted BotStore (src/storage/store.ts)', () => {
     });
     await store.init();
     await store.setSponsorPrivateKey(OWNER_ID, SPONSOR_PK_1);
-    await store.ensureUserProfile(USER_B_ID);
 
-    // Simulate tampered disk file transplanting Owner's sponsorPkEnc into User B and into Owner's targetPkEnc
+    // Simulate tampered disk file swapping sponsorPkEnc into targetPkEnc
     const rawJson = JSON.parse(await readFile(filePath, 'utf8')) as {
       users: Record<string, { wallets: { sponsorPkEnc?: string; targetPkEnc?: string } }>;
     };
-    const ownerSponsorCipher = rawJson.users[String(OWNER_ID)].wallets.sponsorPkEnc;
-    assert.ok(ownerSponsorCipher);
-    rawJson.users[String(USER_B_ID)].wallets.sponsorPkEnc = ownerSponsorCipher;
-    rawJson.users[String(OWNER_ID)].wallets.targetPkEnc = ownerSponsorCipher;
+    const sponsorCipher = rawJson.users[SHARED_PROFILE_KEY].wallets.sponsorPkEnc;
+    assert.ok(sponsorCipher);
+    rawJson.users[SHARED_PROFILE_KEY].wallets.targetPkEnc = sponsorCipher;
     await writeFile(filePath, JSON.stringify(rawJson, null, 2), 'utf8');
 
     const tamperedStore = new BotStore({
@@ -521,7 +585,6 @@ describe('Encrypted BotStore (src/storage/store.ts)', () => {
     });
     await tamperedStore.init();
 
-    assert.throws(() => tamperedStore.getDecryptedWallets(USER_B_ID));
     assert.throws(() => tamperedStore.getDecryptedWallets(OWNER_ID));
   });
 });

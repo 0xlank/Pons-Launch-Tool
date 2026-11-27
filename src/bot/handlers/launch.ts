@@ -151,8 +151,13 @@ export function registerLaunchHandlers(
     session.clearPendingInput(userId);
 
     if (session.isLaunching(userId)) {
+      const activeUserId = session.getActiveLaunchUserId();
+      const msg =
+        activeUserId && activeUserId !== userId
+          ? '⏳ User lain di workspace sedang menjalankan launch. Harap tunggu hingga selesai.'
+          : '⏳ Proses launch sedang berlangsung. Harap tunggu hingga selesai.';
       await answerCallbackSafe(ctx, {
-        text: '⏳ Proses launch sedang berlangsung. Harap tunggu hingga selesai.',
+        text: msg,
         show_alert: true,
       });
       return;

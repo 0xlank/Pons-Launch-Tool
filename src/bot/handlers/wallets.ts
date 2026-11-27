@@ -147,6 +147,7 @@ export function registerWalletHandlers(
     }
 
     await store.clearAllWallets(userId);
+    session.clearAllLaunchConfirmations();
     await answerCallbackSafe(ctx, { text: '✅ Sponsor & Target wallet berhasil dihapus.' });
     await renderScreen(ctx, store, userId, 'wallets');
   });
@@ -236,6 +237,7 @@ export async function handleWalletPendingInput(
     if (pending.field === 'wallet_sponsor_pk') {
       await store.setSponsorPrivateKey(userId, parsed.value);
       session.clearPendingInput(userId);
+      session.clearAllLaunchConfirmations();
       await ctx.reply(
         `✅ <b>Sponsor Wallet tersimpan!</b>\nAlamat: <code>${escapeHtml(account.address)}</code>\n${deleteNote}`,
         { parse_mode: 'HTML' },
@@ -243,6 +245,7 @@ export async function handleWalletPendingInput(
     } else {
       await store.setTargetPrivateKey(userId, parsed.value);
       session.clearPendingInput(userId);
+      session.clearAllLaunchConfirmations();
       await ctx.reply(
         `✅ <b>Target Wallet tersimpan!</b>\nAlamat: <code>${escapeHtml(account.address)}</code>\n${deleteNote}`,
         { parse_mode: 'HTML' },
@@ -279,6 +282,7 @@ export async function handleWalletPendingInput(
     settings.fee.creatorFeeRecipient = parsedAddr.value;
   });
   session.clearPendingInput(userId);
+  session.clearAllLaunchConfirmations();
   await ctx.reply(
     `✅ <b>Creator Fee Wallet tersimpan!</b>\nAlamat: <code>${escapeHtml(parsedAddr.value)}</code>`,
     { parse_mode: 'HTML' },

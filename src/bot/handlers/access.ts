@@ -41,7 +41,7 @@ export function registerAccessHandlers(
         '   Contoh: <code>123456789 Operator A</code>',
         '2. <b>Forward</b> pesan dari user target langsung ke chat ini.',
         '',
-        '<i>Catatan: User baru akan mendapatkan profil kosong yang terisolasi (wallet &amp; Pinata Owner tidak disalin).</i>',
+        '<i>Catatan: User baru akan langsung berbagi workspace bersama (wallet, Pinata JWT, settings, draft &amp; preset), kecuali menu Kelola Akses.</i>',
       ].join('\n'),
       buildCancelInputKeyboard(),
     );

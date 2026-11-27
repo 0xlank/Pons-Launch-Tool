@@ -9,7 +9,7 @@ A production TypeScript Telegram bot for launching tokens on the **Pons V2 Facto
 - **Pre-Flight Simulation**: Runs `simulateContract` and `estimateContractGas` using state overrides (`balance` + clean `code: "0x"`) to verify gas requirements, exact funding coverage, and predicted token/curve addresses before spending gas.
 - **Encrypted Persistent Storage**: Stores Sponsor private keys, Target private keys, and Pinata JWTs using authenticated **AES-256-GCM** encryption in an atomic JSON store (`data/store.json`) with serialized write locking.
 - **Pinata IPFS Media Upload**: Directly upload token logos from Telegram photos or image documents to Pinata IPFS, including single-message Quick Paste with image caption support.
-- **Owner-Only Dynamic Access Control**: Immutable Root Owners configured via `OWNER_TELEGRAM_IDS` can authorize or revoke other Telegram users dynamically via inline buttons. Every user profile is completely isolated.
+- **Owner-Only Dynamic Access Control & Shared Workspace**: Immutable Root Owners configured via `OWNER_TELEGRAM_IDS` can authorize or revoke other Telegram users dynamically via inline buttons. All authorized users share a single synchronized workspace (wallets, Pinata JWT, settings, token draft, and presets) protected by a workspace-wide launch lock, while access management stays strictly Owner-only.
 - **Scoped Launch Data Reset**: One-click reset clears sensitive launch credentials, creator fee recipient, and active token draft fields while preserving network, factory, gas tuning, Pinata credentials, presets, and access control lists.
 
 ## Prerequisites
@@ -59,7 +59,7 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 - **AES-256-GCM**: All secrets (`sponsorPkEnc`, `targetPkEnc`, `pinataJwtEnc`) are encrypted using Node.js `crypto` with a fresh 12-byte random IV and a 16-byte authentication tag, persisted as `v1:<ivHex>:<tagHex>:<cipherHex>`.
 - **Key Derivation**: If `ENCRYPTION_KEY` is a 64-character hex string, its raw 32 bytes are used directly. Otherwise, a 32-byte key is derived deterministically via `scryptSync` with an application-specific domain salt.
 - **Chat Hygiene**: Messages containing private keys or Pinata JWTs are immediately deleted from the Telegram chat after ingestion.
-- **Per-User Isolation**: All profiles in `data/store.json` are keyed by Telegram user ID. Authorizing a new user creates a fresh isolated profile without copying any Owner wallets, JWTs, or token drafts.
+- **Shared Workspace with Field-Bound AAD**: All authorized users share a single encrypted workspace profile (`users.shared`) in `data/store.json` with per-field GCM AAD binding (`v1:shared:<field>`), automatically migrating legacy per-user profiles on startup without losing stored credentials. A workspace-wide launch lock prevents concurrent cross-user launches on the shared wallets.
 
 ## 2-Wallet EIP-7702 Auto-Revoke Race Flow
 

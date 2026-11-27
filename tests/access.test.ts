@@ -257,8 +257,17 @@ describe('Access Control, Owner ACL, Session Cleanup & Keyboard Limits', () => {
       'Second consumption of the same confirmId must fail (replay protection)',
     );
 
-    // revokeUserSession aborts in-flight signal and clears pending input WITHOUT prematurely dropping launch lock
+    // Workspace-wide shared launch lock blocks concurrent launches across different users
     assert.equal(session.tryAcquireLaunchLock(AUTH_USER_1), true);
+    assert.equal(session.tryAcquireLaunchLock(AUTH_USER_2), false);
+    assert.equal(session.isLaunching(AUTH_USER_2), true);
+    assert.equal(session.getActiveLaunchUserId(), AUTH_USER_1);
+
+    // Only lock owner can release it
+    session.releaseLaunchLock(AUTH_USER_2);
+    assert.equal(session.isLaunching(), true);
+
+    // revokeUserSession aborts in-flight signal and clears pending input WITHOUT prematurely dropping launch lock
     const signal = session.getLaunchAbortSignal(AUTH_USER_1);
     assert.equal(signal?.aborted, false);
 
@@ -269,6 +278,19 @@ describe('Access Control, Owner ACL, Session Cleanup & Keyboard Limits', () => {
 
     session.releaseLaunchLock(AUTH_USER_1);
     assert.equal(session.isLaunching(AUTH_USER_1), false);
+
+    // clearAllLaunchConfirmations invalidates pending confirmations across all users
+    const snapA = session.createLaunchConfirmation(AUTH_USER_1, {
+      chatId: AUTH_USER_1,
+      salt: `0x${'ab'.repeat(32)}`,
+      predictedToken: '0x2222222222222222222222222222222222222222',
+      predictedCurve: '0x3333333333333333333333333333333333333333',
+      launchFeeWei: 200000000000000n,
+      fundWei: 1000000000000000n,
+      creatorFeeRecipient: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+    });
+    session.clearAllLaunchConfirmations();
+    assert.equal(session.consumeLaunchConfirmation(AUTH_USER_1, snapA.confirmId, AUTH_USER_1), undefined);
 
     // clearUserSession clears pending input and lock completely
     session.setPendingInput(AUTH_USER_1, {

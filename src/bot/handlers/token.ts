@@ -199,6 +199,7 @@ export function registerTokenHandlers(
   bot.callbackQuery('tok:clear', async (ctx) => {
     const userId = ctx.from.id;
     await store.clearTokenDraft(userId);
+    session.clearAllLaunchConfirmations();
     await answerCallbackSafe(ctx, { text: '✅ Draft token dikosongkan.' });
     await renderScreen(ctx, store, userId, 'token');
   });
@@ -217,6 +218,7 @@ export function registerTokenHandlers(
     const presetId = ctx.match[1];
     try {
       await store.loadPresetToDraft(userId, presetId);
+      session.clearAllLaunchConfirmations();
       await answerCallbackSafe(ctx, { text: '✅ Preset dimuat ke draft aktif.' });
       await renderScreen(ctx, store, userId, 'token');
     } catch {
@@ -390,6 +392,7 @@ export async function handleTokenPendingInput(
     }
 
     session.clearPendingInput(userId);
+    session.clearAllLaunchConfirmations();
     await ctx.reply(
       `✅ <b>Logo berhasil diunggah ke IPFS!</b>\n• CID: <code>${escapeHtml(uploadResult.cid)}</code>\n• URL: <code>${escapeHtml(uploadResult.url)}</code>${captionSummary}`,
       { parse_mode: 'HTML' },
@@ -420,6 +423,7 @@ export async function handleTokenPendingInput(
         draft.name = text;
       });
       session.clearPendingInput(userId);
+      session.clearAllLaunchConfirmations();
       await renderScreen(ctx, store, userId, 'token', { forceReply: true });
       return true;
     }
@@ -435,6 +439,7 @@ export async function handleTokenPendingInput(
         draft.symbol = text;
       });
       session.clearPendingInput(userId);
+      session.clearAllLaunchConfirmations();
       await renderScreen(ctx, store, userId, 'token', { forceReply: true });
       return true;
     }
@@ -451,6 +456,7 @@ export async function handleTokenPendingInput(
         draft.logo = parsedLogo.value;
       });
       session.clearPendingInput(userId);
+      session.clearAllLaunchConfirmations();
       await renderScreen(ctx, store, userId, 'token', { forceReply: true });
       return true;
     }
@@ -467,6 +473,7 @@ export async function handleTokenPendingInput(
         draft.description = clean;
       });
       session.clearPendingInput(userId);
+      session.clearAllLaunchConfirmations();
       await renderScreen(ctx, store, userId, 'token', { forceReply: true });
       return true;
     }
@@ -495,6 +502,7 @@ export async function handleTokenPendingInput(
         draft.socials[key] = parsedSocial.value;
       });
       session.clearPendingInput(userId);
+      session.clearAllLaunchConfirmations();
       await renderScreen(ctx, store, userId, 'socials', { forceReply: true });
       return true;
     }
@@ -511,6 +519,7 @@ export async function handleTokenPendingInput(
         draft.customSalt = parsed.value;
       });
       session.clearPendingInput(userId);
+      session.clearAllLaunchConfirmations();
       await renderScreen(ctx, store, userId, 'token', { forceReply: true });
       return true;
     }
@@ -525,6 +534,7 @@ export async function handleTokenPendingInput(
       }
       await store.updateTokenDraft(userId, (draft) => applyQuickPastePatch(draft, parsed.value));
       session.clearPendingInput(userId);
+      session.clearAllLaunchConfirmations();
       await ctx.reply(
         `✅ <b>Quick Paste berhasil!</b>\nField diperbarui: <code>${escapeHtml(parsed.value.matchedFields.join(', '))}</code>`,
         { parse_mode: 'HTML' },

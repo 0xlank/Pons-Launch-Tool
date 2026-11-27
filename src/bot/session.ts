@@ -84,8 +84,12 @@ const DEFAULT_CONFIRM_TTL_MS = 90_000;
 
 export class SessionManager {
   private readonly pendingInputs = new Map<number, PendingInputState>();
-  private readonly activeLaunches = new Map<number, AbortController>();
   private readonly launchConfirmations = new Map<number, LaunchConfirmationSnapshot>();
+  /**
+   * Workspace-wide single active launch lock because all authorized users share
+   * the same Sponsor and Target wallets (prevents cross-user nonce collisions).
+   */
+  private activeLaunch: { userId: number; controller: AbortController } | undefined;
 
   setPendingInput(
     userId: number,
@@ -160,46 +164,65 @@ export class SessionManager {
     this.launchConfirmations.delete(userId);
   }
 
+  /**
+   * Invalidates all pending confirmation tokens across all users whenever shared
+   * workspace wallets, settings, or token draft are mutated.
+   */
+  clearAllLaunchConfirmations(): void {
+    this.launchConfirmations.clear();
+  }
+
   tryAcquireLaunchLock(userId: number): boolean {
-    if (this.activeLaunches.has(userId)) {
+    if (this.activeLaunch !== undefined) {
       return false;
     }
-    this.activeLaunches.set(userId, new AbortController());
+    this.activeLaunch = {
+      userId,
+      controller: new AbortController(),
+    };
     return true;
   }
 
   getLaunchAbortSignal(userId: number): AbortSignal | undefined {
-    return this.activeLaunches.get(userId)?.signal;
+    if (this.activeLaunch?.userId !== userId) {
+      return undefined;
+    }
+    return this.activeLaunch.controller.signal;
   }
 
   releaseLaunchLock(userId: number): void {
-    this.activeLaunches.delete(userId);
+    if (this.activeLaunch?.userId === userId) {
+      this.activeLaunch = undefined;
+    }
   }
 
-  isLaunching(userId: number): boolean {
-    return this.activeLaunches.has(userId);
+  isLaunching(_userId?: number): boolean {
+    return this.activeLaunch !== undefined;
+  }
+
+  getActiveLaunchUserId(): number | undefined {
+    return this.activeLaunch?.userId;
   }
 
   /**
    * Invoked when an Owner revokes a user's access: clears pending input & confirmation
-   * tokens and aborts any in-flight pre-broadcast launch without breaking the active lock.
+   * tokens and aborts any in-flight pre-broadcast launch started by that user without
+   * breaking the active workspace lock prematurely.
    */
   revokeUserSession(userId: number): void {
     this.pendingInputs.delete(userId);
     this.launchConfirmations.delete(userId);
-    const controller = this.activeLaunches.get(userId);
-    if (controller) {
-      controller.abort();
+    if (this.activeLaunch?.userId === userId) {
+      this.activeLaunch.controller.abort();
     }
   }
 
   clearUserSession(userId: number): void {
     this.pendingInputs.delete(userId);
     this.launchConfirmations.delete(userId);
-    const controller = this.activeLaunches.get(userId);
-    if (controller) {
-      controller.abort();
+    if (this.activeLaunch?.userId === userId) {
+      this.activeLaunch.controller.abort();
+      this.activeLaunch = undefined;
     }
-    this.activeLaunches.delete(userId);
   }
 }
